@@ -1,0 +1,77 @@
+# KICS - Infrastructure as Code security scan
+# KICS is Checkmarx's open-source scanner for infrastructure and configuration files. In this
+# repository it covers the Dockerfile, docker-compose.yml and any other supported IaC files
+# (for example Terraform, Kubernetes or CloudFormation) that are added later.
+# Each run does two things:
+#   1. Report: every supported file is scanned. The results are published as a job summary,
+#      as annotations on the changed lines (pull requests), as alerts in Security > Code scanning,
+#      and as a downloadable artifact (JSON, SARIF and a readable HTML report).
+#   2. Gate: the run fails when a finding of CRITICAL or HIGH severity exists. MEDIUM and LOW
+#      findings are reported but do not fail the run.
+name: KICS IaC scan
+
+# Triggers: pushes to the default branch, every pull request, and manual runs from the Actions tab.
+# No path filter is set, so a change to any file starts the workflow.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# Least-privilege permissions for the workflow token.
+permissions:
+  contents: read           # read the repository; no write access to code
+  pull-requests: write     # post the results table as a pull request comment
+  security-events: write   # upload SARIF results to Code scanning
+
+jobs:
+  kics:
+    runs-on: ubuntu-24.04
+    steps:
+      # Step 1 - Check out the repository.
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false   # do not keep the access token in the local git configuration
+
+      # Step 2 - Create the folder that receives the scan results.
+      - name: Create results folder
+        run: mkdir -p kics-results
+
+      # Step 3 - Run the scan and apply the severity gate.
+      # The action scans the whole repository and writes its reports to kics-results/.
+      - name: Run KICS
+        uses: checkmarx/kics-github-action@05aa5eb70eede1355220f4ca5238d96b397e30a6 # v2.1.20
+        with:
+          path: "."                                  # scan the whole repository
+          token: ${{ secrets.GITHUB_TOKEN }}
+          output_path: kics-results
+          output_formats: "json,sarif,html"          # JSON for tooling, SARIF for Code scanning, HTML for reading
+          # A pull request comment only applies to pull requests. On a push there is no pull
+          # request, and the failed comment call would also skip the pass/fail decision below.
+          enable_comments: ${{ github.event_name == 'pull_request' }}
+          comments_with_queries: true                # include the rule descriptions in the comment
+          enable_jobs_summary: true                  # results table on the run's Summary page
+          enable_annotations: true                   # annotations on the affected lines
+          # Severity gate: CRITICAL and HIGH findings fail the run; MEDIUM and LOW are reported only.
+          fail_on: critical,high
+
+      # Step 4 - Publish the findings to Security > Code scanning.
+      # The category keeps KICS alerts separate from other tools, such as 2ms and Vorpal.
+      # Alerts dismissed in the Security tab remain closed on later runs.
+      - name: Upload SARIF to GitHub Code scanning
+        if: always()   # publish the results even when the severity gate failed the run
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: kics-results/results.sarif
+          category: kics
+
+      # Step 5 - Retain the reports as a downloadable artifact (kics-reports, 30 days).
+      - name: Keep the full reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: kics-reports
+          path: kics-results/
+          retention-days: 30
+          if-no-files-found: error   # a run without a report is treated as a failed run
